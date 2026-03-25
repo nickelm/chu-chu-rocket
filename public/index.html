@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chu Chu Rocket</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a12;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100vh;
+    font-family: 'Press Start 2P', 'Courier New', monospace;
+    color: #e0e0e0; user-select: none; overflow: hidden;
+  }
+  h1 {
+    font-size: 20px; letter-spacing: 4px; color: #4fc3f7;
+    text-shadow: 0 0 12px #4fc3f744; margin-bottom: 8px;
+  }
+  #hud {
+    display: flex; justify-content: space-between; align-items: center;
+    width: 624px; font-size: 11px; margin-bottom: 8px;
+  }
+  #hud .label { color: #888; }
+  #hud .val-score { color: #ffd93d; }
+  #hud .val-time { color: #4fc3f7; }
+  #hud .val-time.warning { color: #ff6b6b; }
+  #hud .val-time.critical { animation: blink 0.5s infinite; }
+  #arrow-pips span {
+    display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+    margin-left: 3px; border: 1px solid #333; background: #222;
+  }
+  #arrow-pips span.active {
+    background: #4fc3f7; border-color: #4fc3f7; box-shadow: 0 0 4px #4fc3f744;
+  }
+  canvas { border: 2px solid #2a2a3a; box-shadow: 0 0 30px #00000088; cursor: crosshair; display: block; margin: 0 auto; }
+  #game-ui { text-align: center; }
+  #hud { margin: 0 auto; }
+  #footer { font-size: 8px; color: #555; margin-top: 10px; letter-spacing: 2px; }
+  #menu, #gameover { text-align: center; }
+  #menu p { font-size: 10px; color: #888; line-height: 2.2; margin-bottom: 24px; }
+  button {
+    font-family: inherit; font-size: 14px; padding: 14px 32px;
+    background: transparent; border: 2px solid #4fc3f7; color: #4fc3f7;
+    cursor: pointer; letter-spacing: 3px;
+  }
+  button:hover { background: #4fc3f711; }
+  #gameover .final-score { font-size: 28px; color: #ffd93d; margin: 8px 0; }
+  #gameover .subtitle { font-size: 10px; color: #888; margin-bottom: 24px; }
+  #gameover h2 { font-size: 16px; color: #ff6b6b; margin-bottom: 16px; animation: blink 1s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* Lobby styles */
+  #lobby { text-align: center; max-width: 500px; }
+  #lobby h2 { font-size: 14px; color: #4fc3f7; margin-bottom: 20px; letter-spacing: 3px; }
+  #lobby input {
+    font-family: inherit; font-size: 11px; padding: 10px 16px;
+    background: #1a1a2e; border: 1px solid #333; color: #e0e0e0;
+    text-align: center; margin-bottom: 12px; width: 260px; letter-spacing: 2px;
+  }
+  #lobby input::placeholder { color: #555; }
+  .lobby-buttons { display: flex; gap: 12px; justify-content: center; margin-bottom: 20px; }
+  .lobby-buttons button { font-size: 11px; padding: 10px 20px; }
+  #room-list-container { margin-top: 16px; }
+  #room-list-container h3 { font-size: 10px; color: #888; margin-bottom: 10px; letter-spacing: 2px; }
+  .room-entry {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 16px; margin: 4px 0; background: #1a1a2e; border: 1px solid #2a2a3a;
+    cursor: pointer; font-size: 10px;
+  }
+  .room-entry:hover { border-color: #4fc3f7; }
+  .room-entry .room-name { color: #4fc3f7; }
+  .room-entry .room-players { color: #888; }
+
+  /* Room view */
+  #room-view { margin-top: 16px; }
+  #room-view h3 { font-size: 14px; color: #ffd93d; margin-bottom: 16px; letter-spacing: 3px; }
+  .player-slot {
+    font-size: 10px; padding: 6px 12px; margin: 4px 0;
+    background: #1a1a2e; border: 1px solid #2a2a3a; text-align: left;
+  }
+  .player-slot.empty { color: #333; }
+  #btn-start-mp { margin-top: 16px; }
+  #btn-back-lobby { font-size: 10px; padding: 8px 16px; margin-top: 12px; border-color: #666; color: #888; }
+
+  /* Multiplayer HUD scoreboard */
+  #mp-scores {
+    display: flex; gap: 16px; justify-content: center; margin-bottom: 8px;
+    font-size: 10px; width: 624px;
+  }
+  .mp-score-entry { display: flex; align-items: center; gap: 6px; }
+  .mp-score-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .mp-score-name { color: #888; }
+  .mp-score-val { color: #ffd93d; }
+
+  /* Game over scoreboard */
+  #gameover-scores { margin: 12px 0 20px; }
+  .go-score-row { font-size: 11px; padding: 6px 0; }
+  .go-score-row.winner { font-size: 13px; }
+
+  #room-info { font-size: 9px; color: #555; margin-bottom: 4px; letter-spacing: 2px; }
+</style>
+</head>
+<body>
+
+<h1>CHU CHU ROCKET</h1>
+
+<div id="menu">
+  <p>
+    CLICK TO PLACE ARROWS<br>
+    CLICK AGAIN TO ROTATE<br>
+    RIGHT-CLICK TO REMOVE<br>
+    ARROW KEYS AIM LAST ARROW<br>
+    MAX 5 ARROWS · OLDEST REPLACED<br>
+    ARROWS FADE AFTER 20s<br>
+    GUIDE 🐭 TO YOUR 🚀 · KEEP 🐱 AWAY!
+  </p>
+  <div style="display:flex;gap:12px;justify-content:center">
+    <button id="btn-start">START</button>
+    <button id="btn-multiplayer">MULTIPLAYER</button>
+  </div>
+</div>
+
+<div id="lobby" style="display:none">
+  <h2>MULTIPLAYER</h2>
+  <input id="player-name" placeholder="YOUR NAME" maxlength="12">
+  <div class="lobby-buttons">
+    <button id="btn-create">CREATE ROOM</button>
+  </div>
+  <div id="room-list-container">
+    <h3>OPEN ROOMS</h3>
+    <div id="room-list"><div style="font-size:9px;color:#555">No rooms available</div></div>
+  </div>
+  <div id="room-view" style="display:none">
+    <h3 id="room-name-display"></h3>
+    <div id="room-players"></div>
+    <button id="btn-start-mp" style="display:none">START GAME</button>
+    <br>
+    <button id="btn-back-lobby">BACK</button>
+  </div>
+  <br>
+  <button id="btn-back-menu" style="font-size:10px;padding:8px 16px;border-color:#666;color:#888">BACK TO MENU</button>
+</div>
+
+<div id="gameover" style="display:none">
+  <h2>TIME UP</h2>
+  <div id="gameover-scores"></div>
+  <div class="final-score" id="final-score">0</div>
+  <div class="subtitle">MICE COLLECTED</div>
+  <button id="btn-restart">PLAY AGAIN</button>
+</div>
+
+<div id="game-ui" style="display:none">
+  <div id="room-info"></div>
+  <div id="mp-scores" style="display:none"></div>
+  <div id="hud">
+    <div><span class="label">SCORE </span><span class="val-score" id="hud-score">0</span></div>
+    <div><span class="label">TIME </span><span class="val-time" id="hud-time">5:00</span></div>
+    <div><span class="label">ARROWS </span><span id="arrow-pips"></span></div>
+  </div>
+  <canvas id="game" width="624" height="468"></canvas>
+  <div id="footer">CLICK: PLACE / ROTATE &nbsp;·&nbsp; RIGHT-CLICK: REMOVE &nbsp;·&nbsp; ARROW KEYS: AIM LAST &nbsp;·&nbsp; MAX 5</div>
+</div>
+
+<script src="/shared/game-logic.js"></script>
+<script>
+// ── Pull shared logic into local scope ────────────────────
+const G = window.GameLogic;
+const { COLS, ROWS, DIR, DX, DY, TICK_MS, GAME_TIME, MAX_MICE, MAX_CATS,
+        MOUSE_SPAWN_INTERVAL, CAT_SPAWN_INTERVAL, CAT_PENALTY, MAX_ARROWS,
+        ARROW_LIFETIME, ARROW_LOCK_TIME, SPAWN_POINTS, CAT_SPAWN_POINTS } = G;
+
+// ── Client-only constants ─────────────────────────────────
+const CELL = 52;
+const DIR_ARROWS = ['▲', '▶', '▼', '◀'];
+const PLAYER_COLORS = ['#4fc3f7', '#ff6b6b', '#69f0ae', '#ffd93d'];
+const DEFAULT_ROCKET = { r: 4, c: 5 };
+
+// ── Precompute wall segments for rendering ────────────────
+const walls = G.initWalls();
+const wallSegments = [];
+{
+  const rendered = new Set();
+  for (const w of walls) {
+    const [rs, cs, ds] = w.split(',').map(Number);
+    if (ds === DIR.RIGHT) {
+      const k = `v-${rs}-${cs+1}`;
+      if (!rendered.has(k)) { rendered.add(k); wallSegments.push({ x1:(cs+1)*CELL, y1:rs*CELL, x2:(cs+1)*CELL, y2:(rs+1)*CELL }); }
+    } else if (ds === DIR.DOWN) {
+      const k = `h-${rs+1}-${cs}`;
+      if (!rendered.has(k)) { rendered.add(k); wallSegments.push({ x1:cs*CELL, y1:(rs+1)*CELL, x2:(cs+1)*CELL, y2:(rs+1)*CELL }); }
+    }
+  }
+}
+
+// ── Game State ────────────────────────────────────────────
+let mice = [];
+let cats = [];
+let arrows = [];
+let score = 0;
+let scores = [0, 0, 0, 0];
+let timeLeft = GAME_TIME;
+let tickCount = 0;
+let lastTickTime = 0;
+let absorbing = [];
+let gameRunning = false;
+let tickInterval = null;
+let timerInterval = null;
+
+// ── Multiplayer State ─────────────────────────────────────
+let ws = null;
+let isMultiplayer = false;
+let localSlot = -1;
+let rockets = []; // [{r,c,owner,active}]
+let roomName = '';
+let roomPlayers = {}; // slot → {name, connected}
+let inRoom = false;
+
+// ── DOM refs ──────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const menuEl = document.getElementById('menu');
+const gameUI = document.getElementById('game-ui');
+const gameoverEl = document.getElementById('gameover');
+const hudScore = document.getElementById('hud-score');
+const hudTime = document.getElementById('hud-time');
+const arrowPips = document.getElementById('arrow-pips');
+const finalScoreEl = document.getElementById('final-score');
+const lobbyEl = document.getElementById('lobby');
+const roomListEl = document.getElementById('room-list');
+const roomListContainer = document.getElementById('room-list-container');
+const roomViewEl = document.getElementById('room-view');
+const roomNameDisplay = document.getElementById('room-name-display');
+const roomPlayersEl = document.getElementById('room-players');
+const btnStartMp = document.getElementById('btn-start-mp');
+const mpScoresEl = document.getElementById('mp-scores');
+const roomInfoEl = document.getElementById('room-info');
+const gameoverScoresEl = document.getElementById('gameover-scores');
+const playerNameInput = document.getElementById('player-name');
+
+for (let i = 0; i < MAX_ARROWS; i++) arrowPips.appendChild(document.createElement('span'));
+
+// ── Helpers ───────────────────────────────────────────────
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1,3), 16);
+  const g = parseInt(hex.slice(3,5), 16);
+  const b = parseInt(hex.slice(5,7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function getPlayerName() {
+  return playerNameInput.value.trim() || '';
+}
+
+// ── WebSocket Client ──────────────────────────────────────
+function connectWS(callback) {
+  if (ws && ws.readyState === WebSocket.OPEN) { if (callback) callback(); return; }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}`);
+  ws.onopen = () => { if (callback) callback(); };
+  ws.onclose = () => {
+    ws = null;
+    if (isMultiplayer && gameRunning) {
+      endGame();
+    }
+  };
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    handleServerMessage(msg);
+  };
+}
+
+function sendMsg(type, data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type, ...data }));
+  }
+}
+
+function handleServerMessage(msg) {
+  switch (msg.type) {
+    case 'room_created':
+      localSlot = msg.slot;
+      roomName = msg.roomName;
+      roomPlayers = {};
+      roomPlayers[msg.slot] = { name: msg.playerName, connected: true };
+      inRoom = true;
+      showRoomView();
+      break;
+
+    case 'room_list':
+      renderRoomList(msg.rooms);
+      break;
+
+    case 'room_joined':
+      localSlot = msg.slot;
+      roomName = msg.roomName;
+      roomPlayers = {};
+      for (const p of msg.players) {
+        roomPlayers[p.slot] = { name: p.name, connected: true };
+      }
+      inRoom = true;
+      showRoomView();
+      break;
+
+    case 'player_joined':
+      roomPlayers[msg.slot] = { name: msg.name, connected: true };
+      if (inRoom && !gameRunning) updateRoomPlayerList();
+      break;
+
+    case 'player_left':
+      if (roomPlayers[msg.slot]) {
+        roomPlayers[msg.slot].connected = false;
+      }
+      if (gameRunning) {
+        // Mark rocket as inactive
+        for (const rk of rockets) {
+          if (rk.owner === msg.slot) rk.active = false;
+        }
+      }
+      if (inRoom && !gameRunning) updateRoomPlayerList();
+      break;
+
+    case 'game_started':
+      rockets = msg.rockets.map(rk => ({ ...rk, active: true }));
+      startMultiplayerGame(msg);
+      break;
+
+    case 'tick':
+      mice = msg.mice;
+      cats = msg.cats;
+      arrows = msg.arrows;
+      scores = msg.scores;
+      timeLeft = msg.timeLeft;
+      lastTickTime = performance.now();
+      if (msg.absorb) {
+        for (const a of msg.absorb) {
+          absorbing.push({ r: a.r, c: a.c, start: performance.now(), type: a.type });
+        }
+      }
+      break;
+
+    case 'game_over':
+      scores = msg.scores;
+      endGame();
+      break;
+
+    case 'error':
+      console.warn('Server error:', msg.message);
+      break;
+  }
+}
+
+// ── Lobby UI ──────────────────────────────────────────────
+function showLobby() {
+  menuEl.style.display = 'none';
+  gameoverEl.style.display = 'none';
+  gameUI.style.display = 'none';
+  lobbyEl.style.display = 'block';
+  roomViewEl.style.display = 'none';
+  roomListContainer.style.display = 'block';
+  inRoom = false;
+  connectWS(() => sendMsg('list_rooms'));
+}
+
+function showRoomView() {
+  roomListContainer.style.display = 'none';
+  roomViewEl.style.display = 'block';
+  roomNameDisplay.textContent = roomName.toUpperCase();
+  btnStartMp.style.display = (localSlot === 0) ? 'inline-block' : 'none';
+  updateRoomPlayerList();
+}
+
+function updateRoomPlayerList() {
+  let html = '';
+  for (let i = 0; i < 4; i++) {
+    const p = roomPlayers[i];
+    const color = PLAYER_COLORS[i];
+    if (p && p.connected) {
+      const isMe = (i === localSlot) ? ' (YOU)' : '';
+      html += `<div class="player-slot" style="border-left:3px solid ${color};color:${color}">P${i+1}: ${p.name}${isMe}</div>`;
+    } else {
+      html += `<div class="player-slot empty">P${i+1}: ---</div>`;
+    }
+  }
+  roomPlayersEl.innerHTML = html;
+}
+
+function renderRoomList(rooms) {
+  if (!rooms || rooms.length === 0) {
+    roomListEl.innerHTML = '<div style="font-size:9px;color:#555">No rooms available</div>';
+    return;
+  }
+  let html = '';
+  for (const r of rooms) {
+    html += `<div class="room-entry" data-room="${r.name}">
+      <span class="room-name">${r.name.toUpperCase()}</span>
+      <span class="room-players">${r.playerCount}/4</span>
+    </div>`;
+  }
+  roomListEl.innerHTML = html;
+  for (const el of roomListEl.querySelectorAll('.room-entry')) {
+    el.addEventListener('click', () => {
+      sendMsg('join_room', { room: el.dataset.room, name: getPlayerName() });
+    });
+  }
+}
+
+document.getElementById('btn-multiplayer').addEventListener('click', showLobby);
+document.getElementById('btn-back-menu').addEventListener('click', () => {
+  lobbyEl.style.display = 'none';
+  menuEl.style.display = 'block';
+  inRoom = false;
+});
+document.getElementById('btn-create').addEventListener('click', () => {
+  connectWS(() => sendMsg('create_room', { name: getPlayerName() }));
+});
+document.getElementById('btn-back-lobby').addEventListener('click', () => {
+  sendMsg('leave_room');
+  inRoom = false;
+  roomViewEl.style.display = 'none';
+  roomListContainer.style.display = 'block';
+  sendMsg('list_rooms');
+});
+btnStartMp.addEventListener('click', () => {
+  sendMsg('start_game');
+});
+
+// ── Simulation Tick (single-player only) ──────────────────
+function tick() {
+  tickCount++;
+  lastTickTime = performance.now();
+  const arrowMap = G.buildArrowMap(arrows);
+
+  for (const m of mice) G.moveEntity(m, arrowMap, walls, 1);
+  for (const c of cats) G.moveEntity(c, arrowMap, walls, 3);
+
+  // Mice → rocket = score
+  const miceBefore = mice.length;
+  mice = mice.filter(m => {
+    if (m.r === DEFAULT_ROCKET.r && m.c === DEFAULT_ROCKET.c) {
+      absorbing.push({ r: m.r, c: m.c, start: performance.now(), type: 'mouse' });
+      return false;
+    }
+    return true;
+  });
+  score += miceBefore - mice.length;
+
+  // Cats → rocket = penalty
+  const catsBefore = cats.length;
+  cats = cats.filter(c => {
+    if (c.r === DEFAULT_ROCKET.r && c.c === DEFAULT_ROCKET.c) {
+      absorbing.push({ r: c.r, c: c.c, start: performance.now(), type: 'cat' });
+      return false;
+    }
+    return true;
+  });
+  const catsHit = catsBefore - cats.length;
+  if (catsHit > 0) score = Math.max(0, score - catsHit * CAT_PENALTY);
+
+  // Cats eat mice
+  const catPositions = new Set(cats.map(c => `${c.r},${c.c}`));
+  mice = mice.filter(m => {
+    if (catPositions.has(`${m.r},${m.c}`)) {
+      absorbing.push({ r: m.r, c: m.c, start: performance.now(), type: 'eaten' });
+      return false;
+    }
+    return true;
+  });
+
+  if (tickCount % MOUSE_SPAWN_INTERVAL === 0) {
+    G.spawnMouse(mice, cats);
+    if (Math.random() < 0.35) G.spawnMouse(mice, cats);
+  }
+  if (tickCount % CAT_SPAWN_INTERVAL === 0) G.spawnCat(cats, mice);
+
+  const now = Date.now();
+  arrows = arrows.filter(a => now - a.placedAt < ARROW_LIFETIME);
+}
+
+// ── Rendering ─────────────────────────────────────────────
+// IMPORTANT: No ctx.shadowBlur anywhere.
+
+function draw(timestamp) {
+  if (!gameRunning) return;
+  requestAnimationFrame(draw);
+
+  const elapsed = timestamp - lastTickTime;
+  const t = Math.min(elapsed / TICK_MS, 1);
+  const W = COLS * CELL, H = ROWS * CELL;
+
+  ctx.restore();
+  ctx.save();
+  ctx.globalAlpha = 1.0;
+  ctx.globalCompositeOperation = 'source-over';
+
+  // Background
+  ctx.fillStyle = '#12121e';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid lines
+  ctx.strokeStyle = '#1a1a2e';
+  ctx.lineWidth = 1;
+  ctx.lineCap = 'butt';
+  for (let i = 0; i <= COLS; i++) {
+    ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, H); ctx.stroke();
+  }
+  for (let i = 0; i <= ROWS; i++) {
+    ctx.beginPath(); ctx.moveTo(0, i * CELL); ctx.lineTo(W, i * CELL); ctx.stroke();
+  }
+
+  // Interior walls
+  ctx.strokeStyle = '#5a5a8a';
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  for (const seg of wallSegments) {
+    ctx.beginPath(); ctx.moveTo(seg.x1, seg.y1); ctx.lineTo(seg.x2, seg.y2); ctx.stroke();
+  }
+
+  // Spawn point dots
+  ctx.globalAlpha = 1.0;
+  for (const sp of SPAWN_POINTS) {
+    ctx.fillStyle = '#4fc3f755';
+    ctx.beginPath();
+    ctx.arc(sp.c * CELL + CELL/2, sp.r * CELL + CELL/2, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (const sp of CAT_SPAWN_POINTS) {
+    ctx.fillStyle = '#ff6b6b55';
+    ctx.beginPath();
+    ctx.arc(sp.c * CELL + CELL/2, sp.r * CELL + CELL/2, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Hover indicator
+  if (hoverR >= 0 && hoverC >= 0) {
+    ctx.fillStyle = 'rgba(79,195,247,0.10)';
+    ctx.fillRect(hoverC * CELL, hoverR * CELL, CELL, CELL);
+  }
+
+  // Rockets
+  if (isMultiplayer) {
+    for (const rk of rockets) {
+      const rx = rk.c * CELL + CELL/2, ry = rk.r * CELL + CELL/2;
+      const color = PLAYER_COLORS[rk.owner];
+      const isLocal = rk.owner === localSlot;
+      const alpha = rk.active ? 1.0 : 0.3;
+      const glowPhase = (Math.sin(timestamp / 500) + 1) / 2;
+      const glowRadius = (isLocal ? 26 : 22) + glowPhase * 8;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, glowRadius);
+      const [cr, cg, cb] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
+      grad.addColorStop(0, `rgba(${cr},${cg},${cb},0.35)`);
+      grad.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(rx, ry, glowRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = alpha;
+      ctx.font = isLocal ? '30px serif' : '26px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('🚀', rx, ry);
+      ctx.restore();
+    }
+  } else {
+    // Single-player rocket
+    const rx = DEFAULT_ROCKET.c * CELL + CELL/2, ry = DEFAULT_ROCKET.r * CELL + CELL/2;
+    const glowPhase = (Math.sin(timestamp / 500) + 1) / 2;
+    const glowRadius = 24 + glowPhase * 8;
+    const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, glowRadius);
+    grad.addColorStop(0, 'rgba(255,107,0,0.3)');
+    grad.addColorStop(1, 'rgba(255,107,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(rx, ry, glowRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+    ctx.font = '28px serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('🚀', rx, ry);
+  }
+
+  // Mice
+  ctx.globalAlpha = 1.0;
+  ctx.font = '20px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const m of mice) {
+    const px = lerp(m.prevC, m.c, t) * CELL + CELL/2;
+    const py = lerp(m.prevR, m.r, t) * CELL + CELL/2;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(m.dir * Math.PI / 2);
+    ctx.fillText('🐭', 0, 0);
+    ctx.restore();
+  }
+
+  // Cats
+  ctx.globalAlpha = 1.0;
+  ctx.font = '26px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const c of cats) {
+    const px = lerp(c.prevC, c.c, t) * CELL + CELL/2;
+    const py = lerp(c.prevR, c.r, t) * CELL + CELL/2;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.fillText('🐱', 0, 0);
+    ctx.restore();
+  }
+
+  // Absorbing effects
+  const now = performance.now();
+  absorbing = absorbing.filter(a => now - a.start < 500);
+  for (const a of absorbing) {
+    const progress = (now - a.start) / 500;
+    const scale = Math.max(0.01, 1 - progress);
+    const px = a.c * CELL + CELL/2, py = a.r * CELL + CELL/2;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, 1 - progress);
+    ctx.translate(px, py);
+    ctx.scale(scale, scale);
+    ctx.rotate(progress * Math.PI);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (a.type === 'mouse') { ctx.font = '20px serif'; ctx.fillText('🐭', 0, 0); }
+    else if (a.type === 'cat') { ctx.font = '26px serif'; ctx.fillText('🐱', 0, 0); }
+    else if (a.type === 'eaten') { ctx.font = '16px serif'; ctx.fillText('💥', 0, 0); }
+    ctx.restore();
+  }
+
+  // Arrows — drawn LAST (on top of everything)
+  ctx.globalAlpha = 1.0;
+  const nowMs = Date.now();
+  const playerId = isMultiplayer ? localSlot : 0;
+  const mostRecent = G.getMostRecentArrow(arrows, playerId);
+
+  for (const a of arrows) {
+    const ax = a.c * CELL + CELL/2, ay = a.r * CELL + CELL/2;
+    const age = nowMs - a.placedAt;
+    const remaining = Math.max(0, 1 - age / ARROW_LIFETIME);
+    const isLocked = age >= ARROW_LOCK_TIME;
+    const color = PLAYER_COLORS[a.owner];
+    const ringColor = isLocked ? '#666666' : color;
+    const radius = CELL/2 - 3;
+    const isMostRecent = (a === mostRecent) && !isLocked;
+    const isOwn = (a.owner === playerId);
+    const ownerAlpha = isOwn ? 1.0 : 0.55;
+
+    // Dark backing disc
+    ctx.save();
+    ctx.globalAlpha = 0.85 * ownerAlpha;
+    ctx.fillStyle = '#12121e';
+    ctx.beginPath();
+    ctx.arc(ax, ay, radius + 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Highlight ring for most recent arrow
+    if (isMostRecent && isOwn) {
+      ctx.save();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.3 + 0.2 * Math.sin(timestamp / 200);
+      ctx.beginPath();
+      ctx.arc(ax, ay, radius + 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Expiry ring
+    ctx.save();
+    ctx.strokeStyle = ringColor;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.5 * ownerAlpha;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(ax, ay, radius, -Math.PI/2, -Math.PI/2 + remaining * 2 * Math.PI);
+    ctx.stroke();
+    ctx.restore();
+
+    // Glow behind arrow
+    ctx.save();
+    const glow = ctx.createRadialGradient(ax, ay, 0, ax, ay, 14);
+    glow.addColorStop(0, hexToRgba(color, 0.25));
+    glow.addColorStop(1, hexToRgba(color, 0));
+    ctx.fillStyle = glow;
+    ctx.globalAlpha = (remaining < 0.2 ? remaining * 5 : 1) * ownerAlpha;
+    ctx.beginPath();
+    ctx.arc(ax, ay, 14, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Arrow glyph
+    ctx.save();
+    ctx.globalAlpha = (remaining < 0.2 ? 0.3 + remaining * 3.5 : 1) * ownerAlpha;
+    ctx.fillStyle = color;
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(DIR_ARROWS[a.dir], ax, ay);
+    ctx.restore();
+  }
+
+  ctx.globalAlpha = 1.0;
+
+  // ── HUD updates ──
+  if (isMultiplayer) {
+    // Multiplayer scoreboard
+    hudScore.textContent = scores[localSlot] || 0;
+    let html = '';
+    for (let i = 0; i < 4; i++) {
+      if (!roomPlayers[i]) continue;
+      const color = PLAYER_COLORS[i];
+      const name = roomPlayers[i].name || `P${i+1}`;
+      const isMe = i === localSlot;
+      html += `<div class="mp-score-entry">
+        <span class="mp-score-dot" style="background:${color}${isMe ? '' : '88'}"></span>
+        <span class="mp-score-name" style="color:${isMe ? color : '#888'}">${name}</span>
+        <span class="mp-score-val">${scores[i]}</span>
+      </div>`;
+    }
+    mpScoresEl.innerHTML = html;
+  } else {
+    hudScore.textContent = score;
+  }
+
+  const mins = Math.floor(timeLeft / 60);
+  const secs = timeLeft % 60;
+  hudTime.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+  hudTime.className = 'val-time' +
+    (timeLeft <= 10 ? ' critical warning' : timeLeft <= 30 ? ' warning' : '');
+
+  const myArrows = arrows.filter(a => a.owner === playerId).length;
+  const pips = arrowPips.children;
+  for (let i = 0; i < MAX_ARROWS; i++) {
+    pips[i].className = i < myArrows ? 'active' : '';
+    pips[i].style.background = i < myArrows ? PLAYER_COLORS[playerId] : '';
+    pips[i].style.borderColor = i < myArrows ? PLAYER_COLORS[playerId] : '';
+  }
+}
+
+// ── Input ─────────────────────────────────────────────────
+let hoverR = -1, hoverC = -1;
+
+function cellFromEvent(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const cx = (e.clientX ?? e.touches?.[0]?.clientX ?? 0) - rect.left;
+  const cy = (e.clientY ?? e.touches?.[0]?.clientY ?? 0) - rect.top;
+  const c = Math.floor(cx * scaleX / CELL);
+  const r = Math.floor(cy * scaleY / CELL);
+  if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return null;
+  return { r, c };
+}
+
+canvas.addEventListener('mousemove', e => {
+  const cell = cellFromEvent(e);
+  if (cell) { hoverR = cell.r; hoverC = cell.c; }
+  else { hoverR = hoverC = -1; }
+});
+canvas.addEventListener('mouseleave', () => { hoverR = hoverC = -1; });
+
+function isOnRocket(r, c) {
+  if (isMultiplayer) {
+    return rockets.some(rk => rk.r === r && rk.c === c);
+  }
+  return r === DEFAULT_ROCKET.r && c === DEFAULT_ROCKET.c;
+}
+
+function placeOrRotateArrow(r, c) {
+  if (!gameRunning) return;
+  if (isOnRocket(r, c)) return;
+
+  if (isMultiplayer) {
+    sendMsg('place', { r, c });
+    return;
+  }
+
+  // Single-player local logic
+  const playerId = 0;
+  const existing = arrows.find(a => a.r === r && a.c === c && a.owner === playerId);
+  if (existing) {
+    if (Date.now() - existing.placedAt >= ARROW_LOCK_TIME) return;
+    existing.dir = (existing.dir + 1) % 4;
+  } else {
+    const mine = arrows.filter(a => a.owner === playerId);
+    if (mine.length >= MAX_ARROWS) {
+      const oldest = mine.reduce((a, b) => a.placedAt < b.placedAt ? a : b);
+      arrows.splice(arrows.indexOf(oldest), 1);
+    }
+    arrows.push({ r, c, dir: DIR.RIGHT, owner: playerId, placedAt: Date.now() });
+  }
+}
+
+canvas.addEventListener('click', e => {
+  const cell = cellFromEvent(e);
+  if (cell) placeOrRotateArrow(cell.r, cell.c);
+});
+
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (!gameRunning) return;
+  const cell = cellFromEvent(e);
+  if (!cell) return;
+
+  if (isMultiplayer) {
+    sendMsg('remove', { r: cell.r, c: cell.c });
+    return;
+  }
+
+  const idx = arrows.findIndex(a => a.r === cell.r && a.c === cell.c && a.owner === 0);
+  if (idx !== -1) arrows.splice(idx, 1);
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const cell = cellFromEvent(e);
+  if (cell) placeOrRotateArrow(cell.r, cell.c);
+}, { passive: false });
+
+document.addEventListener('keydown', e => {
+  if (!gameRunning) return;
+
+  let dir = null;
+  switch (e.key) {
+    case 'ArrowUp':    dir = DIR.UP; break;
+    case 'ArrowRight': dir = DIR.RIGHT; break;
+    case 'ArrowDown':  dir = DIR.DOWN; break;
+    case 'ArrowLeft':  dir = DIR.LEFT; break;
+    default: return;
+  }
+
+  e.preventDefault();
+
+  if (isMultiplayer) {
+    sendMsg('aim', { dir });
+    return;
+  }
+
+  const recent = G.getMostRecentArrow(arrows, 0);
+  if (recent) {
+    if (Date.now() - recent.placedAt >= ARROW_LOCK_TIME) return;
+    recent.dir = dir;
+  }
+});
+
+// ── Game lifecycle ────────────────────────────────────────
+function startGame() {
+  isMultiplayer = false;
+  localSlot = 0;
+  mice = []; cats = []; arrows = []; absorbing = [];
+  score = 0; scores = [0,0,0,0]; timeLeft = GAME_TIME; tickCount = 0;
+  lastTickTime = performance.now();
+  gameRunning = true;
+
+  menuEl.style.display = 'none';
+  lobbyEl.style.display = 'none';
+  gameoverEl.style.display = 'none';
+  gameUI.style.display = 'block';
+  mpScoresEl.style.display = 'none';
+  roomInfoEl.textContent = '';
+
+  ctx.save();
+
+  tickInterval = setInterval(tick, TICK_MS);
+  timerInterval = setInterval(() => {
+    timeLeft--;
+    if (timeLeft <= 0) endGame();
+  }, 1000);
+
+  requestAnimationFrame(draw);
+}
+
+function startMultiplayerGame(msg) {
+  isMultiplayer = true;
+  mice = []; cats = []; arrows = []; absorbing = [];
+  scores = [0, 0, 0, 0]; timeLeft = GAME_TIME; tickCount = 0;
+  lastTickTime = performance.now();
+  gameRunning = true;
+
+  menuEl.style.display = 'none';
+  lobbyEl.style.display = 'none';
+  gameoverEl.style.display = 'none';
+  gameUI.style.display = 'block';
+  mpScoresEl.style.display = 'flex';
+  roomInfoEl.textContent = roomName.toUpperCase();
+
+  ctx.save();
+  requestAnimationFrame(draw);
+}
+
+function endGame() {
+  gameRunning = false;
+  if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  gameUI.style.display = 'none';
+  gameoverEl.style.display = 'block';
+
+  if (isMultiplayer) {
+    // Build ranked scoreboard
+    const entries = [];
+    for (let i = 0; i < 4; i++) {
+      if (roomPlayers[i]) {
+        entries.push({ slot: i, name: roomPlayers[i].name || `P${i+1}`, score: scores[i] });
+      }
+    }
+    entries.sort((a, b) => b.score - a.score);
+    let html = '';
+    entries.forEach((e, idx) => {
+      const color = PLAYER_COLORS[e.slot];
+      const isWinner = idx === 0;
+      const isMe = e.slot === localSlot;
+      html += `<div class="go-score-row${isWinner ? ' winner' : ''}" style="color:${color}">
+        ${isWinner ? '👑 ' : ''}${e.name}: ${e.score}${isMe ? ' (YOU)' : ''}
+      </div>`;
+    });
+    gameoverScoresEl.innerHTML = html;
+    finalScoreEl.textContent = scores[localSlot];
+    document.querySelector('#gameover .subtitle').textContent = 'YOUR SCORE';
+  } else {
+    gameoverScoresEl.innerHTML = '';
+    finalScoreEl.textContent = score;
+    document.querySelector('#gameover .subtitle').textContent = 'MICE COLLECTED';
+  }
+}
+
+document.getElementById('btn-start').addEventListener('click', startGame);
+document.getElementById('btn-restart').addEventListener('click', () => {
+  if (isMultiplayer) {
+    isMultiplayer = false;
+    showLobby();
+  } else {
+    startGame();
+  }
+});
+</script>
+</body>
+</html>
