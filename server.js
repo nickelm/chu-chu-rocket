@@ -30,6 +30,42 @@ function generateRoomName() {
   return name;
 }
 
+// ── AI Player ─────────────────────────────────────────────
+class AIPlayer {
+  constructor(slot, room) {
+    this.slot = slot;
+    this.room = room;
+    this.cursorR = Math.floor(G.ROWS / 2);
+    this.cursorC = Math.floor(G.COLS / 2);
+    this.lastActionTime = 0;
+    this.actionCooldown = 1200;
+    this.thinkTimer = null;
+  }
+
+  start() {
+    this.thinkTimer = setInterval(() => this.think(), 1500);
+  }
+
+  stop() {
+    if (this.thinkTimer) { clearInterval(this.thinkTimer); this.thinkTimer = null; }
+  }
+
+  think() {
+    if (this.room.state !== 'playing') return;
+    const now = Date.now();
+    if (now - this.lastActionTime < this.actionCooldown) return;
+
+    const r = Math.floor(Math.random() * G.ROWS);
+    const c = Math.floor(Math.random() * G.COLS);
+    if (this.room.rockets.some(rk => rk.r === r && rk.c === c)) return;
+
+    this.cursorR = r;
+    this.cursorC = c;
+    handlePlace(null, this.room, this.slot, r, c);
+    this.lastActionTime = now;
+  }
+}
+
 // ── Rooms ─────────────────────────────────────────────────
 const rooms = new Map();
 const clients = new Map(); // ws → { roomName, slot }
@@ -51,6 +87,8 @@ function createRoom(ws, playerName) {
     tickTimer: null,
     timerTimer: null,
     absorb: [],
+    aiPlayers: [],
+    aiSlots: new Set(),
   };
 
   const slot = 0;
@@ -70,11 +108,13 @@ function createRoom(ws, playerName) {
 function joinRoom(ws, roomName, playerName) {
   const room = rooms.get(roomName);
   if (!room) return send(ws, { type: 'error', message: 'Room not found' });
-  if (room.players.size >= 4) return send(ws, { type: 'error', message: 'Room is full' });
+  const totalPlayers = room.players.size + room.aiSlots.size;
+  if (totalPlayers >= 4) return send(ws, { type: 'error', message: 'Room is full' });
 
   // Find first available slot
   const taken = new Set();
   for (const p of room.players.values()) taken.add(p.slot);
+  for (const s of room.aiSlots) taken.add(s);
   let slot = -1;
   for (let i = 0; i < 4; i++) { if (!taken.has(i)) { slot = i; break; } }
   if (slot === -1) return send(ws, { type: 'error', message: 'Room is full' });
@@ -83,10 +123,13 @@ function joinRoom(ws, roomName, playerName) {
   room.players.set(ws, { slot, name: pName });
   clients.set(ws, { roomName, slot });
 
-  // Build player list
+  // Build player list (humans + AI)
   const players = [];
   for (const p of room.players.values()) {
-    players.push({ slot: p.slot, name: p.name });
+    players.push({ slot: p.slot, name: p.name, ai: false });
+  }
+  for (const ai of room.aiPlayers) {
+    players.push({ slot: ai.slot, name: 'Bot', ai: true });
   }
 
   send(ws, {
@@ -134,10 +177,13 @@ function leaveRoom(ws) {
 
   broadcastToRoom(room, { type: 'player_left', slot: playerInfo ? playerInfo.slot : -1 });
 
-  // Garbage collect empty rooms
+  // Garbage collect empty rooms (no humans left)
   if (room.players.size === 0) {
     if (room.tickTimer) clearInterval(room.tickTimer);
     if (room.timerTimer) clearInterval(room.timerTimer);
+    for (const ai of room.aiPlayers) ai.stop();
+    room.aiPlayers = [];
+    room.aiSlots.clear();
     rooms.delete(room.name);
   }
 }
@@ -145,10 +191,11 @@ function leaveRoom(ws) {
 function listRooms(ws) {
   const list = [];
   for (const room of rooms.values()) {
-    if (room.players.size < 4) {
+    const total = room.players.size + room.aiSlots.size;
+    if (total < 4) {
       list.push({
         name: room.name,
-        playerCount: room.players.size,
+        playerCount: total,
         state: room.state,
       });
     }
@@ -199,14 +246,14 @@ function startGameInRoom(room) {
   room.rockets = [];
   room.absorb = [];
 
-  // Place rockets for each player
-  // First player gets center
-  const playerSlots = [];
-  for (const p of room.players.values()) playerSlots.push(p.slot);
-  playerSlots.sort((a, b) => a - b);
+  // Place rockets for all players (human + AI)
+  const allSlots = [];
+  for (const p of room.players.values()) allSlots.push(p.slot);
+  for (const s of room.aiSlots) allSlots.push(s);
+  allSlots.sort((a, b) => a - b);
 
-  for (let i = 0; i < playerSlots.length; i++) {
-    const slot = playerSlots[i];
+  for (let i = 0; i < allSlots.length; i++) {
+    const slot = allSlots[i];
     let pos;
     if (i === 0) {
       pos = { r: 4, c: 5 }; // center
@@ -217,6 +264,9 @@ function startGameInRoom(room) {
       room.rockets.push({ r: pos.r, c: pos.c, owner: slot, active: true });
     }
   }
+
+  // Start AI think loops
+  for (const ai of room.aiPlayers) ai.start();
 
   // Broadcast game_started
   broadcastToRoom(room, {
@@ -281,13 +331,16 @@ function serverTick(room) {
     G.spawnMouse(room.mice, room.cats);
     if (Math.random() < 0.35) G.spawnMouse(room.mice, room.cats);
   }
-  if (room.tickCount % G.CAT_SPAWN_INTERVAL === 0) G.spawnCat(room.cats, room.mice);
+  if (room.tickCount % G.CAT_SPAWN_INTERVAL === 0 && room.mice.length >= room.cats.length * 3) {
+    G.spawnCat(room.cats, room.mice);
+  }
 
   // Expire arrows
   const now = Date.now();
   room.arrows = room.arrows.filter(a => now - a.placedAt < G.ARROW_LIFETIME);
 
   // Broadcast tick
+  const cursors = room.aiPlayers.map(ai => ({ slot: ai.slot, r: ai.cursorR, c: ai.cursorC, ai: true }));
   broadcastToRoom(room, {
     type: 'tick',
     mice: room.mice,
@@ -297,6 +350,7 @@ function serverTick(room) {
     timeLeft: room.timeLeft,
     tickCount: room.tickCount,
     absorb: room.absorb,
+    cursors,
   });
 }
 
@@ -304,6 +358,7 @@ function endGameInRoom(room) {
   room.state = 'finished';
   if (room.tickTimer) { clearInterval(room.tickTimer); room.tickTimer = null; }
   if (room.timerTimer) { clearInterval(room.timerTimer); room.timerTimer = null; }
+  for (const ai of room.aiPlayers) ai.stop();
 
   broadcastToRoom(room, {
     type: 'game_over',
@@ -329,6 +384,10 @@ function handlePlace(ws, room, slot, r, c) {
   // Can't place on any rocket
   if (room.rockets.some(rk => rk.r === r && rk.c === c)) return;
 
+  // Block if another player's arrow occupies this cell
+  const otherArrow = room.arrows.find(a => a.r === r && a.c === c && a.owner !== slot);
+  if (otherArrow) return;
+
   const existing = room.arrows.find(a => a.r === r && a.c === c && a.owner === slot);
   if (existing) {
     // Rotate
@@ -350,6 +409,14 @@ function handleRemove(ws, room, slot, r, c) {
   if (room.state !== 'playing') return;
   const idx = room.arrows.findIndex(a => a.r === r && a.c === c && a.owner === slot);
   if (idx !== -1) room.arrows.splice(idx, 1);
+}
+
+function handleRotateCCW(ws, room, slot, r, c) {
+  if (room.state !== 'playing') return;
+  const existing = room.arrows.find(a => a.r === r && a.c === c && a.owner === slot);
+  if (!existing) return;
+  if (Date.now() - existing.placedAt >= G.ARROW_LOCK_TIME) return;
+  existing.dir = (existing.dir + 3) % 4;
 }
 
 function handleAim(ws, room, slot, dir) {
@@ -475,6 +542,82 @@ wss.on('connection', (ws) => {
         if (!client) return;
         const room = rooms.get(client.roomName);
         if (room) handleAim(ws, room, client.slot, msg.dir);
+        break;
+      }
+
+      case 'rotate_ccw': {
+        if (!client) return;
+        const room = rooms.get(client.roomName);
+        if (room) handleRotateCCW(ws, room, client.slot, msg.r, msg.c);
+        break;
+      }
+
+      case 'cursor': {
+        if (!client) return;
+        const room = rooms.get(client.roomName);
+        if (room) {
+          broadcastToRoom(room, { type: 'cursor', slot: client.slot, r: msg.r, c: msg.c }, ws);
+        }
+        break;
+      }
+
+      case 'add_ai': {
+        if (!client) return;
+        const room = rooms.get(client.roomName);
+        if (!room || room.state !== 'lobby') return;
+        if (client.slot !== 0) return send(ws, { type: 'error', message: 'Only the room creator can add AI' });
+        const total = room.players.size + room.aiSlots.size;
+        if (total >= 4) return send(ws, { type: 'error', message: 'Room is full' });
+        // Find next free slot
+        const taken = new Set();
+        for (const p of room.players.values()) taken.add(p.slot);
+        for (const s of room.aiSlots) taken.add(s);
+        let aiSlot = -1;
+        for (let i = 0; i < 4; i++) { if (!taken.has(i)) { aiSlot = i; break; } }
+        if (aiSlot === -1) return;
+        const ai = new AIPlayer(aiSlot, room);
+        room.aiPlayers.push(ai);
+        room.aiSlots.add(aiSlot);
+        broadcastToRoom(room, { type: 'player_joined', slot: aiSlot, name: 'Bot', ai: true });
+        break;
+      }
+
+      case 'remove_ai': {
+        if (!client) return;
+        const room = rooms.get(client.roomName);
+        if (!room || room.state !== 'lobby') return;
+        if (client.slot !== 0) return;
+        const slot = msg.slot;
+        if (!room.aiSlots.has(slot)) return;
+        room.aiSlots.delete(slot);
+        room.aiPlayers = room.aiPlayers.filter(ai => ai.slot !== slot);
+        broadcastToRoom(room, { type: 'player_left', slot });
+        break;
+      }
+
+      case 'quick_play': {
+        if (client) leaveRoom(ws);
+        createRoom(ws, msg.name || 'Player 1');
+        const room = rooms.get(clients.get(ws).roomName);
+        if (!room) return;
+        // Add 3 AI players
+        for (let i = 0; i < 3; i++) {
+          const taken = new Set();
+          for (const p of room.players.values()) taken.add(p.slot);
+          for (const s of room.aiSlots) taken.add(s);
+          let aiSlot = -1;
+          for (let j = 0; j < 4; j++) { if (!taken.has(j)) { aiSlot = j; break; } }
+          if (aiSlot === -1) break;
+          const ai = new AIPlayer(aiSlot, room);
+          room.aiPlayers.push(ai);
+          room.aiSlots.add(aiSlot);
+        }
+        // Send player info so client knows about AI slots
+        const players = [];
+        for (const p of room.players.values()) players.push({ slot: p.slot, name: p.name, ai: false });
+        for (const ai of room.aiPlayers) players.push({ slot: ai.slot, name: 'Bot', ai: true });
+        send(ws, { type: 'quick_play_ready', players });
+        startGameInRoom(room);
         break;
       }
     }

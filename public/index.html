@@ -110,7 +110,7 @@
   <p>
     CLICK TO PLACE ARROWS<br>
     CLICK AGAIN TO ROTATE<br>
-    RIGHT-CLICK TO REMOVE<br>
+    RIGHT-CLICK TO ROTATE BACK<br>
     ARROW KEYS AIM LAST ARROW<br>
     MAX 5 ARROWS · OLDEST REPLACED<br>
     ARROWS FADE AFTER 20s<br>
@@ -118,6 +118,7 @@
   </p>
   <div style="display:flex;gap:12px;justify-content:center">
     <button id="btn-start">START</button>
+    <button id="btn-quickplay">QUICK PLAY</button>
     <button id="btn-multiplayer">MULTIPLAYER</button>
   </div>
 </div>
@@ -135,7 +136,10 @@
   <div id="room-view" style="display:none">
     <h3 id="room-name-display"></h3>
     <div id="room-players"></div>
-    <button id="btn-start-mp" style="display:none">START GAME</button>
+    <div style="display:flex;gap:12px;justify-content:center;margin-top:16px">
+      <button id="btn-add-ai" style="display:none;font-size:10px;padding:8px 16px">ADD AI</button>
+      <button id="btn-start-mp" style="display:none">START GAME</button>
+    </div>
     <br>
     <button id="btn-back-lobby">BACK</button>
   </div>
@@ -160,7 +164,7 @@
     <div><span class="label">ARROWS </span><span id="arrow-pips"></span></div>
   </div>
   <canvas id="game" width="624" height="468"></canvas>
-  <div id="footer">CLICK: PLACE / ROTATE &nbsp;·&nbsp; RIGHT-CLICK: REMOVE &nbsp;·&nbsp; ARROW KEYS: AIM LAST &nbsp;·&nbsp; MAX 5</div>
+  <div id="footer">CLICK: PLACE / ROTATE &nbsp;·&nbsp; RIGHT-CLICK: ROTATE BACK &nbsp;·&nbsp; ARROW KEYS: AIM LAST &nbsp;·&nbsp; MAX 5</div>
 </div>
 
 <script src="/shared/game-logic.js"></script>
@@ -207,6 +211,8 @@ let absorbing = [];
 let gameRunning = false;
 let tickInterval = null;
 let timerInterval = null;
+let rafId = null;
+let lastScoreKey = '';
 
 // ── Multiplayer State ─────────────────────────────────────
 let ws = null;
@@ -216,10 +222,13 @@ let rockets = []; // [{r,c,owner,active}]
 let roomName = '';
 let roomPlayers = {}; // slot → {name, connected}
 let inRoom = false;
+let remoteCursors = {}; // slot → {r, c}
+let aiCursors = []; // [{slot, r, c}]
+let lastCursorSend = 0;
 
 // ── DOM refs ──────────────────────────────────────────────
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+const ctx = canvas.getContext('2d', { alpha: false });
 const menuEl = document.getElementById('menu');
 const gameUI = document.getElementById('game-ui');
 const gameoverEl = document.getElementById('gameover');
@@ -285,7 +294,7 @@ function handleServerMessage(msg) {
       localSlot = msg.slot;
       roomName = msg.roomName;
       roomPlayers = {};
-      roomPlayers[msg.slot] = { name: msg.playerName, connected: true };
+      roomPlayers[msg.slot] = { name: msg.playerName, connected: true, ai: false };
       inRoom = true;
       showRoomView();
       break;
@@ -299,21 +308,29 @@ function handleServerMessage(msg) {
       roomName = msg.roomName;
       roomPlayers = {};
       for (const p of msg.players) {
-        roomPlayers[p.slot] = { name: p.name, connected: true };
+        roomPlayers[p.slot] = { name: p.name, connected: true, ai: !!p.ai };
       }
       inRoom = true;
       showRoomView();
       break;
 
     case 'player_joined':
-      roomPlayers[msg.slot] = { name: msg.name, connected: true };
+      roomPlayers[msg.slot] = { name: msg.name, connected: true, ai: !!msg.ai };
       if (inRoom && !gameRunning) updateRoomPlayerList();
+      break;
+
+    case 'quick_play_ready':
+      roomPlayers = {};
+      for (const p of msg.players) {
+        roomPlayers[p.slot] = { name: p.name, connected: true, ai: !!p.ai };
+      }
       break;
 
     case 'player_left':
       if (roomPlayers[msg.slot]) {
         roomPlayers[msg.slot].connected = false;
       }
+      delete remoteCursors[msg.slot];
       if (gameRunning) {
         // Mark rocket as inactive
         for (const rk of rockets) {
@@ -340,11 +357,16 @@ function handleServerMessage(msg) {
           absorbing.push({ r: a.r, c: a.c, start: performance.now(), type: a.type });
         }
       }
+      if (msg.cursors) aiCursors = msg.cursors;
       break;
 
     case 'game_over':
       scores = msg.scores;
       endGame();
+      break;
+
+    case 'cursor':
+      remoteCursors[msg.slot] = { r: msg.r, c: msg.c };
       break;
 
     case 'error':
@@ -370,22 +392,30 @@ function showRoomView() {
   roomViewEl.style.display = 'block';
   roomNameDisplay.textContent = roomName.toUpperCase();
   btnStartMp.style.display = (localSlot === 0) ? 'inline-block' : 'none';
+  document.getElementById('btn-add-ai').style.display = (localSlot === 0) ? 'inline-block' : 'none';
   updateRoomPlayerList();
 }
 
 function updateRoomPlayerList() {
   let html = '';
+  let totalPlayers = 0;
   for (let i = 0; i < 4; i++) {
     const p = roomPlayers[i];
     const color = PLAYER_COLORS[i];
     if (p && p.connected) {
+      totalPlayers++;
       const isMe = (i === localSlot) ? ' (YOU)' : '';
-      html += `<div class="player-slot" style="border-left:3px solid ${color};color:${color}">P${i+1}: ${p.name}${isMe}</div>`;
+      const aiIcon = p.ai ? '\u{1F916} ' : '';
+      html += `<div class="player-slot" style="border-left:3px solid ${color};color:${color}">P${i+1}: ${aiIcon}${p.name}${isMe}</div>`;
     } else {
       html += `<div class="player-slot empty">P${i+1}: ---</div>`;
     }
   }
   roomPlayersEl.innerHTML = html;
+  // Hide Add AI if room is full
+  if (localSlot === 0) {
+    document.getElementById('btn-add-ai').style.display = totalPlayers < 4 ? 'inline-block' : 'none';
+  }
 }
 
 function renderRoomList(rooms) {
@@ -426,6 +456,12 @@ document.getElementById('btn-back-lobby').addEventListener('click', () => {
 });
 btnStartMp.addEventListener('click', () => {
   sendMsg('start_game');
+});
+document.getElementById('btn-add-ai').addEventListener('click', () => {
+  sendMsg('add_ai');
+});
+document.getElementById('btn-quickplay').addEventListener('click', () => {
+  connectWS(() => sendMsg('quick_play', { name: getPlayerName() }));
 });
 
 // ── Simulation Tick (single-player only) ──────────────────
@@ -474,7 +510,9 @@ function tick() {
     G.spawnMouse(mice, cats);
     if (Math.random() < 0.35) G.spawnMouse(mice, cats);
   }
-  if (tickCount % CAT_SPAWN_INTERVAL === 0) G.spawnCat(cats, mice);
+  if (tickCount % CAT_SPAWN_INTERVAL === 0 && mice.length >= cats.length * 3) {
+    G.spawnCat(cats, mice);
+  }
 
   const now = Date.now();
   arrows = arrows.filter(a => now - a.placedAt < ARROW_LIFETIME);
@@ -484,15 +522,14 @@ function tick() {
 // IMPORTANT: No ctx.shadowBlur anywhere.
 
 function draw(timestamp) {
-  if (!gameRunning) return;
-  requestAnimationFrame(draw);
+  if (!gameRunning) { rafId = null; return; }
+  rafId = requestAnimationFrame(draw);
 
   const elapsed = timestamp - lastTickTime;
   const t = Math.min(elapsed / TICK_MS, 1);
   const W = COLS * CELL, H = ROWS * CELL;
 
-  ctx.restore();
-  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1.0;
   ctx.globalCompositeOperation = 'source-over';
 
@@ -534,10 +571,42 @@ function draw(timestamp) {
     ctx.fill();
   }
 
-  // Hover indicator
+  // Hover indicator (player-colored)
   if (hoverR >= 0 && hoverC >= 0) {
-    ctx.fillStyle = 'rgba(79,195,247,0.10)';
+    const hoverColor = isMultiplayer ? PLAYER_COLORS[localSlot] : PLAYER_COLORS[0];
+    ctx.fillStyle = hexToRgba(hoverColor, 0.20);
     ctx.fillRect(hoverC * CELL, hoverR * CELL, CELL, CELL);
+  }
+
+  // Remote player cursors
+  if (isMultiplayer) {
+    for (const [slotStr, pos] of Object.entries(remoteCursors)) {
+      const s = parseInt(slotStr);
+      if (s === localSlot || pos.r < 0 || pos.c < 0) continue;
+      ctx.fillStyle = hexToRgba(PLAYER_COLORS[s], 0.15);
+      ctx.fillRect(pos.c * CELL, pos.r * CELL, CELL, CELL);
+      // Small colored dot in corner
+      ctx.fillStyle = hexToRgba(PLAYER_COLORS[s], 0.6);
+      ctx.beginPath();
+      ctx.arc(pos.c * CELL + 8, pos.r * CELL + 8, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // AI cursors — colored crosshair
+    for (const cursor of aiCursors) {
+      const color = PLAYER_COLORS[cursor.slot];
+      const cx = cursor.c * CELL + CELL/2;
+      const cy = cursor.r * CELL + CELL/2;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath(); ctx.moveTo(cx - 12, cy); ctx.lineTo(cx + 12, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx, cy - 12); ctx.lineTo(cx, cy + 12); ctx.stroke();
+      // Small circle at center
+      ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
   }
 
   // Rockets
@@ -549,26 +618,30 @@ function draw(timestamp) {
       const alpha = rk.active ? 1.0 : 0.3;
       const glowPhase = (Math.sin(timestamp / 500) + 1) / 2;
       const glowRadius = (isLocal ? 26 : 22) + glowPhase * 8;
-
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, glowRadius);
       const [cr, cg, cb] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
-      grad.addColorStop(0, `rgba(${cr},${cg},${cb},0.35)`);
+
+      ctx.globalAlpha = alpha;
+
+      // Solid cell background tint
+      ctx.fillStyle = `rgba(${cr},${cg},${cb},0.18)`;
+      ctx.fillRect(rk.c * CELL, rk.r * CELL, CELL, CELL);
+
+      // Radial glow
+      const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, glowRadius);
+      grad.addColorStop(0, `rgba(${cr},${cg},${cb},0.55)`);
       grad.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.arc(rx, ry, glowRadius, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.globalAlpha = alpha;
       ctx.font = isLocal ? '30px serif' : '26px serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#ffffff';
       ctx.fillText('🚀', rx, ry);
-      ctx.restore();
     }
+    ctx.globalAlpha = 1.0;
   } else {
     // Single-player rocket
     const rx = DEFAULT_ROCKET.c * CELL + CELL/2, ry = DEFAULT_ROCKET.r * CELL + CELL/2;
@@ -597,14 +670,14 @@ function draw(timestamp) {
   for (const m of mice) {
     const px = lerp(m.prevC, m.c, t) * CELL + CELL/2;
     const py = lerp(m.prevR, m.r, t) * CELL + CELL/2;
-    ctx.save();
-    ctx.translate(px, py);
-    ctx.rotate(m.dir * Math.PI / 2);
+    const angle = m.dir * Math.PI / 2;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    ctx.setTransform(cos, sin, -sin, cos, px, py);
     ctx.fillText('🐭', 0, 0);
-    ctx.restore();
   }
 
   // Cats
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1.0;
   ctx.font = '26px serif';
   ctx.textAlign = 'center';
@@ -612,31 +685,29 @@ function draw(timestamp) {
   for (const c of cats) {
     const px = lerp(c.prevC, c.c, t) * CELL + CELL/2;
     const py = lerp(c.prevR, c.r, t) * CELL + CELL/2;
-    ctx.save();
-    ctx.translate(px, py);
+    ctx.setTransform(1, 0, 0, 1, px, py);
     ctx.fillText('🐱', 0, 0);
-    ctx.restore();
   }
 
   // Absorbing effects
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   const now = performance.now();
   absorbing = absorbing.filter(a => now - a.start < 500);
   for (const a of absorbing) {
     const progress = (now - a.start) / 500;
-    const scale = Math.max(0.01, 1 - progress);
+    const s = Math.max(0.01, 1 - progress);
     const px = a.c * CELL + CELL/2, py = a.r * CELL + CELL/2;
-    ctx.save();
+    const angle = progress * Math.PI;
+    const cos = Math.cos(angle) * s, sin = Math.sin(angle) * s;
+    ctx.setTransform(cos, sin, -sin, cos, px, py);
     ctx.globalAlpha = Math.max(0, 1 - progress);
-    ctx.translate(px, py);
-    ctx.scale(scale, scale);
-    ctx.rotate(progress * Math.PI);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     if (a.type === 'mouse') { ctx.font = '20px serif'; ctx.fillText('🐭', 0, 0); }
     else if (a.type === 'cat') { ctx.font = '26px serif'; ctx.fillText('🐱', 0, 0); }
     else if (a.type === 'eaten') { ctx.font = '16px serif'; ctx.fillText('💥', 0, 0); }
-    ctx.restore();
   }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
 
   // Arrows — drawn LAST (on top of everything)
   ctx.globalAlpha = 1.0;
@@ -657,28 +728,23 @@ function draw(timestamp) {
     const ownerAlpha = isOwn ? 1.0 : 0.55;
 
     // Dark backing disc
-    ctx.save();
     ctx.globalAlpha = 0.85 * ownerAlpha;
     ctx.fillStyle = '#12121e';
     ctx.beginPath();
     ctx.arc(ax, ay, radius + 1, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
 
     // Highlight ring for most recent arrow
     if (isMostRecent && isOwn) {
-      ctx.save();
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1;
       ctx.globalAlpha = 0.3 + 0.2 * Math.sin(timestamp / 200);
       ctx.beginPath();
       ctx.arc(ax, ay, radius + 3, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.restore();
     }
 
     // Expiry ring
-    ctx.save();
     ctx.strokeStyle = ringColor;
     ctx.lineWidth = 2;
     ctx.globalAlpha = 0.5 * ownerAlpha;
@@ -686,10 +752,8 @@ function draw(timestamp) {
     ctx.beginPath();
     ctx.arc(ax, ay, radius, -Math.PI/2, -Math.PI/2 + remaining * 2 * Math.PI);
     ctx.stroke();
-    ctx.restore();
 
     // Glow behind arrow
-    ctx.save();
     const glow = ctx.createRadialGradient(ax, ay, 0, ax, ay, 14);
     glow.addColorStop(0, hexToRgba(color, 0.25));
     glow.addColorStop(1, hexToRgba(color, 0));
@@ -698,38 +762,39 @@ function draw(timestamp) {
     ctx.beginPath();
     ctx.arc(ax, ay, 14, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
 
     // Arrow glyph
-    ctx.save();
     ctx.globalAlpha = (remaining < 0.2 ? 0.3 + remaining * 3.5 : 1) * ownerAlpha;
     ctx.fillStyle = color;
     ctx.font = 'bold 22px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(DIR_ARROWS[a.dir], ax, ay);
-    ctx.restore();
   }
 
   ctx.globalAlpha = 1.0;
 
-  // ── HUD updates ──
+  // ── HUD updates (only when changed, not every frame) ──
   if (isMultiplayer) {
-    // Multiplayer scoreboard
     hudScore.textContent = scores[localSlot] || 0;
-    let html = '';
-    for (let i = 0; i < 4; i++) {
-      if (!roomPlayers[i]) continue;
-      const color = PLAYER_COLORS[i];
-      const name = roomPlayers[i].name || `P${i+1}`;
-      const isMe = i === localSlot;
-      html += `<div class="mp-score-entry">
-        <span class="mp-score-dot" style="background:${color}${isMe ? '' : '88'}"></span>
-        <span class="mp-score-name" style="color:${isMe ? color : '#888'}">${name}</span>
-        <span class="mp-score-val">${scores[i]}</span>
-      </div>`;
+    const scoreKey = scores.join(',');
+    if (scoreKey !== lastScoreKey) {
+      lastScoreKey = scoreKey;
+      let html = '';
+      for (let i = 0; i < 4; i++) {
+        if (!roomPlayers[i]) continue;
+        const color = PLAYER_COLORS[i];
+        const aiPrefix = roomPlayers[i].ai ? '\u{1F916} ' : '';
+        const name = aiPrefix + (roomPlayers[i].name || `P${i+1}`);
+        const isMe = i === localSlot;
+        html += `<div class="mp-score-entry">
+          <span class="mp-score-dot" style="background:${color}${isMe ? '' : '88'}"></span>
+          <span class="mp-score-name" style="color:${isMe ? color : '#888'}">${name}</span>
+          <span class="mp-score-val">${scores[i]}</span>
+        </div>`;
+      }
+      mpScoresEl.innerHTML = html;
     }
-    mpScoresEl.innerHTML = html;
   } else {
     hudScore.textContent = score;
   }
@@ -768,8 +833,21 @@ canvas.addEventListener('mousemove', e => {
   const cell = cellFromEvent(e);
   if (cell) { hoverR = cell.r; hoverC = cell.c; }
   else { hoverR = hoverC = -1; }
+
+  if (isMultiplayer && ws && ws.readyState === WebSocket.OPEN) {
+    const now = performance.now();
+    if (now - lastCursorSend > 100) {
+      lastCursorSend = now;
+      sendMsg('cursor', { r: hoverR, c: hoverC });
+    }
+  }
 });
-canvas.addEventListener('mouseleave', () => { hoverR = hoverC = -1; });
+canvas.addEventListener('mouseleave', () => {
+  hoverR = hoverC = -1;
+  if (isMultiplayer && ws && ws.readyState === WebSocket.OPEN) {
+    sendMsg('cursor', { r: -1, c: -1 });
+  }
+});
 
 function isOnRocket(r, c) {
   if (isMultiplayer) {
@@ -778,17 +856,12 @@ function isOnRocket(r, c) {
   return r === DEFAULT_ROCKET.r && c === DEFAULT_ROCKET.c;
 }
 
-function placeOrRotateArrow(r, c) {
-  if (!gameRunning) return;
+function localPlaceOrRotate(r, c, playerId) {
+  // Shared logic for local arrow placement (single-player and client-side prediction)
   if (isOnRocket(r, c)) return;
+  // Block if another player's arrow occupies this cell
+  if (arrows.some(a => a.r === r && a.c === c && a.owner !== playerId)) return;
 
-  if (isMultiplayer) {
-    sendMsg('place', { r, c });
-    return;
-  }
-
-  // Single-player local logic
-  const playerId = 0;
   const existing = arrows.find(a => a.r === r && a.c === c && a.owner === playerId);
   if (existing) {
     if (Date.now() - existing.placedAt >= ARROW_LOCK_TIME) return;
@@ -803,6 +876,21 @@ function placeOrRotateArrow(r, c) {
   }
 }
 
+function placeOrRotateArrow(r, c) {
+  if (!gameRunning) return;
+  if (isOnRocket(r, c)) return;
+
+  if (isMultiplayer) {
+    // Client-side prediction: apply locally for instant feedback
+    localPlaceOrRotate(r, c, localSlot);
+    // Server is authoritative; next tick will correct if needed
+    sendMsg('place', { r, c });
+    return;
+  }
+
+  localPlaceOrRotate(r, c, 0);
+}
+
 canvas.addEventListener('click', e => {
   const cell = cellFromEvent(e);
   if (cell) placeOrRotateArrow(cell.r, cell.c);
@@ -814,13 +902,16 @@ canvas.addEventListener('contextmenu', e => {
   const cell = cellFromEvent(e);
   if (!cell) return;
 
-  if (isMultiplayer) {
-    sendMsg('remove', { r: cell.r, c: cell.c });
-    return;
+  const owner = isMultiplayer ? localSlot : 0;
+  const existing = arrows.find(a => a.r === cell.r && a.c === cell.c && a.owner === owner);
+  if (existing) {
+    if (Date.now() - existing.placedAt >= ARROW_LOCK_TIME) return;
+    existing.dir = (existing.dir + 3) % 4;
   }
 
-  const idx = arrows.findIndex(a => a.r === cell.r && a.c === cell.c && a.owner === 0);
-  if (idx !== -1) arrows.splice(idx, 1);
+  if (isMultiplayer) {
+    sendMsg('rotate_ccw', { r: cell.r, c: cell.c });
+  }
 });
 
 canvas.addEventListener('touchstart', e => {
@@ -843,15 +934,15 @@ document.addEventListener('keydown', e => {
 
   e.preventDefault();
 
-  if (isMultiplayer) {
-    sendMsg('aim', { dir });
-    return;
-  }
-
-  const recent = G.getMostRecentArrow(arrows, 0);
+  const owner = isMultiplayer ? localSlot : 0;
+  const recent = G.getMostRecentArrow(arrows, owner);
   if (recent) {
     if (Date.now() - recent.placedAt >= ARROW_LOCK_TIME) return;
     recent.dir = dir;
+  }
+
+  if (isMultiplayer) {
+    sendMsg('aim', { dir });
   }
 });
 
@@ -871,7 +962,7 @@ function startGame() {
   mpScoresEl.style.display = 'none';
   roomInfoEl.textContent = '';
 
-  ctx.save();
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
 
   tickInterval = setInterval(tick, TICK_MS);
   timerInterval = setInterval(() => {
@@ -879,7 +970,7 @@ function startGame() {
     if (timeLeft <= 0) endGame();
   }, 1000);
 
-  requestAnimationFrame(draw);
+  rafId = requestAnimationFrame(draw);
 }
 
 function startMultiplayerGame(msg) {
@@ -888,6 +979,7 @@ function startMultiplayerGame(msg) {
   scores = [0, 0, 0, 0]; timeLeft = GAME_TIME; tickCount = 0;
   lastTickTime = performance.now();
   gameRunning = true;
+  remoteCursors = {};
 
   menuEl.style.display = 'none';
   lobbyEl.style.display = 'none';
@@ -896,8 +988,8 @@ function startMultiplayerGame(msg) {
   mpScoresEl.style.display = 'flex';
   roomInfoEl.textContent = roomName.toUpperCase();
 
-  ctx.save();
-  requestAnimationFrame(draw);
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  rafId = requestAnimationFrame(draw);
 }
 
 function endGame() {
@@ -912,7 +1004,8 @@ function endGame() {
     const entries = [];
     for (let i = 0; i < 4; i++) {
       if (roomPlayers[i]) {
-        entries.push({ slot: i, name: roomPlayers[i].name || `P${i+1}`, score: scores[i] });
+        const aiPrefix = roomPlayers[i].ai ? '\u{1F916} ' : '';
+        entries.push({ slot: i, name: aiPrefix + (roomPlayers[i].name || `P${i+1}`), score: scores[i] });
       }
     }
     entries.sort((a, b) => b.score - a.score);
