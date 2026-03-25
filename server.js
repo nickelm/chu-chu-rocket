@@ -31,38 +31,275 @@ function generateRoomName() {
 }
 
 // ── AI Player ─────────────────────────────────────────────
+
+const PERSONALITIES = ['hoarder', 'saboteur', 'defensive', 'aggressive'];
+
+const DIFFICULTY_TABLE = {
+  //           miceSampled, catsSampled, lookahead, cursorSpeed, cooldown, accuracy, thinkInterval
+  1: { mice: 3,  cats: 1, lookahead: 5,  speed: 2,  cooldown: 3000, accuracy: 0.50, thinkMs: 2500 },
+  2: { mice: 5,  cats: 2, lookahead: 8,  speed: 3,  cooldown: 2000, accuracy: 0.65, thinkMs: 1800 },
+  3: { mice: 8,  cats: 3, lookahead: 12, speed: 5,  cooldown: 1200, accuracy: 0.80, thinkMs: 1200 },
+  4: { mice: 12, cats: 5, lookahead: 18, speed: 7,  cooldown: 800,  accuracy: 0.90, thinkMs: 800  },
+  5: { mice: 20, cats: 8, lookahead: 25, speed: 10, cooldown: 400,  accuracy: 0.97, thinkMs: 500  },
+};
+
+const PERSONALITY_WEIGHTS = {
+  //                     mouseOwn, catAway, catToOpponent, overwriteOpponent, multiMouse
+  hoarder:    { mouseOwn: 1.5, catAway: 0.8, catToOpponent: 0.3, overwrite: 0.2, multiMouse: 2.0 },
+  saboteur:   { mouseOwn: 0.8, catAway: 0.6, catToOpponent: 2.5, overwrite: 1.5, multiMouse: 0.5 },
+  defensive:  { mouseOwn: 1.0, catAway: 2.0, catToOpponent: 0.2, overwrite: 0.3, multiMouse: 0.8 },
+  aggressive: { mouseOwn: 1.0, catAway: 1.0, catToOpponent: 1.5, overwrite: 2.5, multiMouse: 1.0 },
+};
+
+const SCORE_THRESHOLD = 5;
+
 class AIPlayer {
-  constructor(slot, room) {
+  constructor(slot, room, personality, difficulty) {
     this.slot = slot;
     this.room = room;
+    this.personality = personality || PERSONALITIES[Math.floor(Math.random() * PERSONALITIES.length)];
+    this.difficulty = Math.max(1, Math.min(5, difficulty || 3));
+
+    const cfg = DIFFICULTY_TABLE[this.difficulty];
+    this.maxMiceSampled = cfg.mice;
+    this.maxCatsSampled = cfg.cats;
+    this.lookahead = cfg.lookahead;
+    this.cursorSpeed = cfg.speed; // cells per second
+    this.actionCooldown = cfg.cooldown;
+    this.accuracy = cfg.accuracy;
+    this.thinkMs = cfg.thinkMs;
+
+    this.weights = PERSONALITY_WEIGHTS[this.personality];
+
+    // Virtual cursor
     this.cursorR = Math.floor(G.ROWS / 2);
     this.cursorC = Math.floor(G.COLS / 2);
+    this.targetR = this.cursorR;
+    this.targetC = this.cursorC;
+
+    // Timing
     this.lastActionTime = 0;
-    this.actionCooldown = 1200;
     this.thinkTimer = null;
+
+    // Queued action
+    this.pendingCommand = null; // { r, c, dir }
   }
 
   start() {
-    this.thinkTimer = setInterval(() => this.think(), 1500);
+    // Place cursor at own rocket
+    const myRocket = this.room.rockets.find(rk => rk.owner === this.slot);
+    if (myRocket) {
+      this.cursorR = myRocket.r;
+      this.cursorC = myRocket.c;
+      this.targetR = myRocket.r;
+      this.targetC = myRocket.c;
+    }
+    this.thinkTimer = setInterval(() => this.think(), this.thinkMs);
   }
 
   stop() {
     if (this.thinkTimer) { clearInterval(this.thinkTimer); this.thinkTimer = null; }
   }
 
+  // Called each game tick from serverTick — moves cursor, executes pending commands
+  update() {
+    if (this.room.state !== 'playing') return;
+
+    // Move cursor toward target (Manhattan: horizontal first, then vertical)
+    const cellsPerTick = this.cursorSpeed * (G.TICK_MS / 1000);
+    let remaining = cellsPerTick;
+
+    // Horizontal movement
+    if (remaining > 0 && this.cursorC !== this.targetC) {
+      const dc = this.targetC - this.cursorC;
+      const step = Math.min(remaining, Math.abs(dc));
+      this.cursorC += Math.sign(dc) * step;
+      remaining -= step;
+    }
+    // Vertical movement
+    if (remaining > 0 && this.cursorR !== this.targetR) {
+      const dr = this.targetR - this.cursorR;
+      const step = Math.min(remaining, Math.abs(dr));
+      this.cursorR += Math.sign(dr) * step;
+      remaining -= step;
+    }
+
+    // Execute pending command when cursor has arrived and cooldown elapsed
+    if (this.pendingCommand && this.cursorR === this.targetR && this.cursorC === this.targetC) {
+      const now = Date.now();
+      if (now - this.lastActionTime >= this.actionCooldown) {
+        const cmd = this.pendingCommand;
+        this.pendingCommand = null;
+        handlePlace(null, this.room, this.slot, cmd.r, cmd.c);
+        // Set direction on the placed arrow
+        const arrow = this.room.arrows.find(a => a.r === cmd.r && a.c === cmd.c && a.owner === this.slot);
+        if (arrow) arrow.dir = cmd.dir;
+        this.lastActionTime = now;
+      }
+    }
+  }
+
   think() {
     if (this.room.state !== 'playing') return;
-    const now = Date.now();
-    if (now - this.lastActionTime < this.actionCooldown) return;
+    // Don't think while cursor is still moving or we have a pending command
+    if (this.pendingCommand) return;
 
-    const r = Math.floor(Math.random() * G.ROWS);
-    const c = Math.floor(Math.random() * G.COLS);
-    if (this.room.rockets.some(rk => rk.r === r && rk.c === c)) return;
+    const room = this.room;
+    const myRocket = room.rockets.find(rk => rk.owner === this.slot && rk.active);
+    if (!myRocket) return;
 
-    this.cursorR = r;
-    this.cursorC = c;
-    handlePlace(null, this.room, this.slot, r, c);
-    this.lastActionTime = now;
+    const arrowMap = G.buildArrowMap(room.arrows);
+    const myArrowCount = room.arrows.filter(a => a.owner === this.slot).length;
+
+    // ── Perceive: sample mice and cats biased toward own rocket ──
+    const sampledMice = this._sampleEntities(room.mice, this.maxMiceSampled, myRocket);
+    const sampledCats = this._sampleEntities(room.cats, this.maxCatsSampled, myRocket);
+
+    let bestScore = -Infinity;
+    let bestCandidate = null;
+
+    // ── Evaluate mice candidates ──
+    for (const mouse of sampledMice) {
+      const basePath = G.projectPath(mouse.r, mouse.c, mouse.dir, this.lookahead, arrowMap, room.walls, room.rockets, 1);
+
+      for (const cell of basePath.path) {
+        // Skip rocket cells
+        if (room.rockets.some(rk => rk.r === cell.r && rk.c === cell.c)) continue;
+
+        for (let dir = 0; dir < 4; dir++) {
+          // Build hypothetical arrow map
+          const testMap = Object.assign({}, arrowMap);
+          testMap[`${cell.r},${cell.c}`] = dir;
+
+          const newPath = G.projectPath(mouse.r, mouse.c, mouse.dir, this.lookahead, testMap, room.walls, room.rockets, 1);
+
+          let score = 0;
+
+          // mouseValue
+          if (newPath.reachedRocket === this.slot) {
+            score += 10 * this.weights.mouseOwn;
+          } else if (basePath.reachedRocket === this.slot && newPath.reachedRocket !== this.slot) {
+            score -= 15;
+          }
+
+          // Multi-mouse corridor: count other sampled mice that also reach own rocket
+          let multiCount = 0;
+          for (const otherMouse of sampledMice) {
+            if (otherMouse === mouse) continue;
+            const otherNew = G.projectPath(otherMouse.r, otherMouse.c, otherMouse.dir, this.lookahead, testMap, room.walls, room.rockets, 1);
+            if (otherNew.reachedRocket === this.slot) multiCount++;
+          }
+          if (multiCount > 0) score += multiCount * 5 * this.weights.multiMouse;
+
+          // Arrow economy
+          const existingOwn = room.arrows.find(a => a.r === cell.r && a.c === cell.c && a.owner === this.slot);
+          if (existingOwn) {
+            score += 3; // rotate bonus
+          } else if (myArrowCount >= G.MAX_ARROWS) {
+            score -= 2;
+          }
+
+          // Overwrite opponent arrow bonus
+          const opponentArrow = room.arrows.find(a => a.r === cell.r && a.c === cell.c && a.owner !== this.slot);
+          if (opponentArrow) {
+            // Can't actually place on opponent arrow (handlePlace blocks it), skip
+            continue;
+          }
+
+          if (score > bestScore) {
+            bestScore = score;
+            bestCandidate = { r: cell.r, c: cell.c, dir };
+          }
+        }
+      }
+    }
+
+    // ── Evaluate cat candidates ──
+    for (const cat of sampledCats) {
+      const basePath = G.projectPath(cat.r, cat.c, cat.dir, this.lookahead, arrowMap, room.walls, room.rockets, 3);
+
+      for (const cell of basePath.path) {
+        if (room.rockets.some(rk => rk.r === cell.r && rk.c === cell.c)) continue;
+
+        for (let dir = 0; dir < 4; dir++) {
+          const testMap = Object.assign({}, arrowMap);
+          testMap[`${cell.r},${cell.c}`] = dir;
+
+          const newPath = G.projectPath(cat.r, cat.c, cat.dir, this.lookahead, testMap, room.walls, room.rockets, 3);
+
+          let score = 0;
+
+          // catValue: deflect away from own rocket
+          if (basePath.reachedRocket === this.slot && newPath.reachedRocket !== this.slot) {
+            score += 12 * this.weights.catAway;
+          }
+          // catValue: now hits own rocket (bad)
+          if (newPath.reachedRocket === this.slot && basePath.reachedRocket !== this.slot) {
+            score -= 20;
+          }
+          // catValue: redirect toward opponent rocket
+          if (newPath.reachedRocket !== null && newPath.reachedRocket !== this.slot) {
+            score += 3 * this.weights.catToOpponent;
+          }
+
+          // Arrow economy
+          const existingOwn = room.arrows.find(a => a.r === cell.r && a.c === cell.c && a.owner === this.slot);
+          if (existingOwn) {
+            score += 3;
+          } else if (myArrowCount >= G.MAX_ARROWS) {
+            score -= 2;
+          }
+
+          const opponentArrow = room.arrows.find(a => a.r === cell.r && a.c === cell.c && a.owner !== this.slot);
+          if (opponentArrow) continue;
+
+          if (score > bestScore) {
+            bestScore = score;
+            bestCandidate = { r: cell.r, c: cell.c, dir };
+          }
+        }
+      }
+    }
+
+    // ── Decide ──
+    if (!bestCandidate || bestScore < SCORE_THRESHOLD) return;
+
+    // Apply accuracy: chance to pick a random non-optimal direction
+    if (Math.random() > this.accuracy) {
+      const dirs = [0, 1, 2, 3].filter(d => d !== bestCandidate.dir);
+      bestCandidate.dir = dirs[Math.floor(Math.random() * dirs.length)];
+    }
+
+    // Queue command and set cursor target
+    this.pendingCommand = bestCandidate;
+    this.targetR = bestCandidate.r;
+    this.targetC = bestCandidate.c;
+  }
+
+  _sampleEntities(entities, maxCount, myRocket) {
+    if (entities.length <= maxCount) return [...entities];
+
+    // Weight by inverse distance to own rocket (closer = more likely sampled)
+    const weighted = entities.map(e => {
+      const dist = Math.abs(e.r - myRocket.r) + Math.abs(e.c - myRocket.c);
+      return { entity: e, weight: 1 / (1 + dist) };
+    });
+
+    // Weighted random sampling without replacement
+    const sampled = [];
+    const pool = [...weighted];
+    for (let i = 0; i < maxCount && pool.length > 0; i++) {
+      const totalWeight = pool.reduce((sum, w) => sum + w.weight, 0);
+      let rand = Math.random() * totalWeight;
+      let picked = pool.length - 1;
+      for (let j = 0; j < pool.length; j++) {
+        rand -= pool[j].weight;
+        if (rand <= 0) { picked = j; break; }
+      }
+      sampled.push(pool[picked].entity);
+      pool.splice(picked, 1);
+    }
+    return sampled;
   }
 }
 
@@ -129,7 +366,8 @@ function joinRoom(ws, roomName, playerName) {
     players.push({ slot: p.slot, name: p.name, ai: false });
   }
   for (const ai of room.aiPlayers) {
-    players.push({ slot: ai.slot, name: 'Bot', ai: true });
+    const aiName = ai.personality.charAt(0).toUpperCase() + ai.personality.slice(1);
+    players.push({ slot: ai.slot, name: aiName, ai: true, personality: ai.personality, difficulty: ai.difficulty });
   }
 
   send(ws, {
@@ -334,6 +572,9 @@ function serverTick(room) {
   if (room.tickCount % G.CAT_SPAWN_INTERVAL === 0 && room.mice.length >= room.cats.length * 3) {
     G.spawnCat(room.cats, room.mice);
   }
+
+  // Update AI cursors and execute pending commands
+  for (const ai of room.aiPlayers) ai.update();
 
   // Expire arrows
   const now = Date.now();
@@ -575,10 +816,11 @@ wss.on('connection', (ws) => {
         let aiSlot = -1;
         for (let i = 0; i < 4; i++) { if (!taken.has(i)) { aiSlot = i; break; } }
         if (aiSlot === -1) return;
-        const ai = new AIPlayer(aiSlot, room);
+        const ai = new AIPlayer(aiSlot, room, msg.personality, msg.difficulty);
         room.aiPlayers.push(ai);
         room.aiSlots.add(aiSlot);
-        broadcastToRoom(room, { type: 'player_joined', slot: aiSlot, name: 'Bot', ai: true });
+        const aiName = ai.personality.charAt(0).toUpperCase() + ai.personality.slice(1);
+        broadcastToRoom(room, { type: 'player_joined', slot: aiSlot, name: aiName, ai: true, personality: ai.personality, difficulty: ai.difficulty });
         break;
       }
 
@@ -608,14 +850,17 @@ wss.on('connection', (ws) => {
           let aiSlot = -1;
           for (let j = 0; j < 4; j++) { if (!taken.has(j)) { aiSlot = j; break; } }
           if (aiSlot === -1) break;
-          const ai = new AIPlayer(aiSlot, room);
+          const ai = new AIPlayer(aiSlot, room, null, 3);
           room.aiPlayers.push(ai);
           room.aiSlots.add(aiSlot);
         }
         // Send player info so client knows about AI slots
         const players = [];
         for (const p of room.players.values()) players.push({ slot: p.slot, name: p.name, ai: false });
-        for (const ai of room.aiPlayers) players.push({ slot: ai.slot, name: 'Bot', ai: true });
+        for (const ai of room.aiPlayers) {
+          const aiName = ai.personality.charAt(0).toUpperCase() + ai.personality.slice(1);
+          players.push({ slot: ai.slot, name: aiName, ai: true, personality: ai.personality, difficulty: ai.difficulty });
+        }
         send(ws, { type: 'quick_play_ready', players });
         startGameInRoom(room);
         break;

@@ -88,6 +88,36 @@ function moveEntity(entity, arrowMap, walls, turnOnWall) {
   }
 }
 
+// ── Path projection (for AI) ──────────────────────────────
+// Simulate entity movement for N steps without mutating state.
+// Returns { path: [{r,c}], reachedRocket: ownerIndex|null }
+function projectPath(r, c, dir, steps, arrowMap, walls, rockets, turnOnWall) {
+  const path = [{ r, c }];
+  let reachedRocket = null;
+  const visited = new Set();
+
+  for (let i = 0; i < steps; i++) {
+    const key = `${r},${c}`;
+    if (arrowMap[key] !== undefined) dir = arrowMap[key];
+    if (!hasWall(walls, r, c, dir)) {
+      r += DY[dir];
+      c += DX[dir];
+    } else {
+      dir = (dir + turnOnWall) % 4;
+    }
+    path.push({ r, c });
+    for (const rk of rockets) {
+      if (rk.active && rk.r === r && rk.c === c) {
+        return { path, reachedRocket: rk.owner };
+      }
+    }
+    const stateKey = `${r},${c},${dir}`;
+    if (visited.has(stateKey)) return { path, reachedRocket: null };
+    visited.add(stateKey);
+  }
+  return { path, reachedRocket };
+}
+
 // ── Spawning ───────────────────────────────────────────────
 function spawnMouse(mice, cats) {
   if (mice.length >= MAX_MICE) return null;
@@ -141,6 +171,7 @@ exports.initWalls = initWalls;
 exports.buildArrowMap = buildArrowMap;
 exports.getMostRecentArrow = getMostRecentArrow;
 exports.moveEntity = moveEntity;
+exports.projectPath = projectPath;
 exports.spawnMouse = spawnMouse;
 exports.spawnCat = spawnCat;
 
